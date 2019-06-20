@@ -1,9 +1,5 @@
 package com.lightbend.statefulserverless
 
-<<<<<<< HEAD
-class WarmupSpec {
-
-=======
 import akka.actor.ActorSystem
 import akka.testkit.{ImplicitSender, TestKit}
 import com.typesafe.config.ConfigFactory
@@ -23,5 +19,4 @@ class WarmupSpec extends TestKit(ActorSystem("WarmupSpec", ConfigFactory.load("i
       })
     }
   }
->>>>>>> wip
 }

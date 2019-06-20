@@ -1,8 +1,5 @@
 package com.lightbend.statefulserverless
 
-<<<<<<< HEAD
-class Autoscaler {
-=======
 import akka.actor.{Actor, ActorLogging, ActorRef, Props, Timers}
 import akka.cluster.{Cluster, MemberStatus, UniqueAddress}
 import akka.cluster.ddata.Replicator.{Get, GetFailure, GetSuccess, NotFound, ReadLocal, ReadMajority, Update, UpdateSuccess, WriteLocal}
@@ -395,6 +392,4 @@ class Autoscaler(settings: AutoscalerSettings, scalerProps: Props) extends Actor
     }
 
   }
->>>>>>> wip
-
 }
