@@ -39,8 +39,8 @@ object StateManagerSupervisor {
 
   final case class Relay(actorRef: ActorRef)
 
-  def props(client: EntityClient, configuration: StateManager.Configuration, concurrencyEnforcer: ActorRef)(implicit mat: Materializer): Props =
-    Props(new StateManagerSupervisor(client, configuration, concurrencyEnforcer))
+  def props(client: EntityClient, configuration: StateManager.Configuration, concurrencyEnforcer: ActorRef, statsCollector: ActorRef)(implicit mat: Materializer): Props =
+    Props(new StateManagerSupervisor(client, configuration, concurrencyEnforcer, statsCollector))
 }
 
 /**
@@ -53,7 +53,7 @@ object StateManagerSupervisor {
   * persistence starts feeding us events. There's a race condition if we do this in the same persistent actor. This
   * establishes that connection first.
   */
-final class StateManagerSupervisor(client: EntityClient, configuration: StateManager.Configuration, concurrencyEnforcer: ActorRef)(implicit mat: Materializer)
+final class StateManagerSupervisor(client: EntityClient, configuration: StateManager.Configuration, concurrencyEnforcer: ActorRef, statsCollector: ActorRef)(implicit mat: Materializer)
   extends Actor with Stash {
 
   import StateManagerSupervisor._
@@ -73,7 +73,7 @@ final class StateManagerSupervisor(client: EntityClient, configuration: StateMan
     case Relay(relayRef) =>
       // Cluster sharding URL encodes entity ids, so to extract it we need to decode.
       val entityId = URLDecoder.decode(self.path.name, "utf-8")
-      val manager = context.watch(context.actorOf(StateManager.props(configuration, entityId, relayRef, concurrencyEnforcer), "entity"))
+      val manager = context.watch(context.actorOf(StateManager.props(configuration, entityId, relayRef, concurrencyEnforcer, statsCollector), "entity"))
       context.become(forwarding(manager))
       unstashAll()
     case _ => stash()
@@ -114,8 +114,8 @@ object StateManager {
     */
   final case class CommandFailure(msg: String) extends RuntimeException(msg)
 
-  final def props(configuration: Configuration, entityId: String, relay: ActorRef, concurrencyEnforcer: ActorRef): Props =
-    Props(new StateManager(configuration, entityId, relay, concurrencyEnforcer))
+  final def props(configuration: Configuration, entityId: String, relay: ActorRef, concurrencyEnforcer: ActorRef, statsCollector: ActorRef): Props =
+    Props(new StateManager(configuration, entityId, relay, concurrencyEnforcer, statsCollector))
 
   /**
     * Used to ensure the action ids sent to the concurrency enforcer are indeed unique.
@@ -123,7 +123,8 @@ object StateManager {
   private val actorCounter = new AtomicLong(0)
 }
 
-final class StateManager(configuration: StateManager.Configuration, entityId: String, relay: ActorRef, concurrencyEnforcer: ActorRef) extends PersistentActor with ActorLogging {
+final class StateManager(configuration: StateManager.Configuration, entityId: String, relay: ActorRef,
+  concurrencyEnforcer: ActorRef, statsCollector: ActorRef) extends PersistentActor with ActorLogging {
   override final def persistenceId: String = configuration.userFunctionName + entityId
 
   private val actorId = StateManager.actorCounter.incrementAndGet()
@@ -134,14 +135,23 @@ final class StateManager(configuration: StateManager.Configuration, entityId: St
   private[this] final var idCounter = 0l
   private[this] final var inited = false
   private[this] final var currentActionId: String = null
+  private[this] final var reportedDatabaseOperationStarted = false
+  private[this] final var databaseOperationStartTime = 0l
+  private[this] final var commandStartTime = 0l
 
   // Set up passivation timer
   context.setReceiveTimeout(configuration.passivationTimeout.duration)
+
+  // First thing actor will do is access database
+  reportDatabaseOperationStarted()
 
   override final def postStop(): Unit = {
     if (currentActionId != null) {
       log.warning("Stopped but we have a current action id {}", currentActionId)
       reportActionComplete()
+    }
+    if (reportedDatabaseOperationStarted) {
+      reportDatabaseOperationFinished()
     }
     // This will shutdown the stream (if not already shut down)
     relay ! Status.Success(())
@@ -175,7 +185,7 @@ final class StateManager(configuration: StateManager.Configuration, entityId: St
   }
 
   private[this] final def reportActionComplete() = {
-    concurrencyEnforcer ! ActionCompleted(currentActionId)
+    concurrencyEnforcer ! ActionCompleted(currentActionId, System.nanoTime() - commandStartTime)
     currentActionId = null
   }
 
@@ -190,6 +200,7 @@ final class StateManager(configuration: StateManager.Configuration, entityId: St
       payload = payload
     )
     currentRequest = StateManager.OutstandingRequest(idCounter, sender)
+    commandStartTime = System.nanoTime()
     concurrencyEnforcer ! Action(currentActionId, isProxied, () => {
       relay ! EntityStreamIn(ESIMsg.Command(command))
     })
@@ -222,10 +233,12 @@ final class StateManager(configuration: StateManager.Configuration, entityId: St
             currentRequest.replyTo ! r.getPayload.value
             commandHandled()
           } else {
+            reportDatabaseOperationStarted()
             var eventsLeft = events.size
             persistAll(events) { _ =>
               eventsLeft -= 1
               if (eventsLeft <= 0) { // Remove this hack when switching to Akka Persistence Typed
+                reportDatabaseOperationFinished()
                 r.snapshot.foreach(saveSnapshot)
                 // Make sure that the current request is still ours
                 if (currentRequest == null || currentRequest.commandId != commandId) {
@@ -296,10 +309,30 @@ final class StateManager(configuration: StateManager.Configuration, entityId: St
       maybeInit(Some(offer))
 
     case RecoveryCompleted =>
+      reportDatabaseOperationFinished()
       maybeInit(None)
 
     case event: pbAny =>
       maybeInit(None)
       relay ! EntityStreamIn(ESIMsg.Event(Event(lastSequenceNr, Some(event))))
+  }
+
+  private def reportDatabaseOperationStarted(): Unit = {
+    if (reportedDatabaseOperationStarted) {
+      log.warning("Already reported database operation started")
+    } else {
+      databaseOperationStartTime = System.nanoTime()
+      reportedDatabaseOperationStarted = true
+      statsCollector ! StatsCollector.DatabaseOperationStarted
+    }
+  }
+
+  private def reportDatabaseOperationFinished(): Unit = {
+    if (!reportedDatabaseOperationStarted) {
+      log.warning("Hadn't reported database operation started")
+    } else {
+      reportedDatabaseOperationStarted = false
+      statsCollector ! StatsCollector.DatabaseOperationFinished(System.nanoTime() - databaseOperationStartTime)
+    }
   }
 }

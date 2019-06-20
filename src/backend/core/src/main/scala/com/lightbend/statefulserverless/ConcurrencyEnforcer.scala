@@ -48,7 +48,7 @@ import scala.concurrent.duration.{Deadline, FiniteDuration}
   */
 object ConcurrencyEnforcer {
   case class Action(id: String, isProxied: Boolean, start: () => Unit)
-  case class ActionCompleted(id: String)
+  case class ActionCompleted(id: String, timeNanos: Long)
 
   case class ConcurrencyEnforcerSettings(
     concurrency: Int,
@@ -81,9 +81,9 @@ class ConcurrencyEnforcer(settings: ConcurrencyEnforcerSettings, statsCollector:
       reportCommand(a)
       queue = queue.enqueue(a)
 
-    case ActionCompleted(id) =>
+    case ActionCompleted(id, timeNanos) =>
       if (outstanding.contains(id)) {
-        completeAction(id)
+        completeAction(id, timeNanos)
       } else {
         if (queue.exists(_.id == id)) {
           // It's been completed before it's been executed, generally the state manager actor will already have
@@ -98,7 +98,7 @@ class ConcurrencyEnforcer(settings: ConcurrencyEnforcerSettings, statsCollector:
       outstanding.foreach {
         case (id, action) if action.deadline.isOverdue() =>
           log.warning("Action {} has exceeded the action timeout of {}", id, settings.actionTimeout)
-          completeAction(id)
+          completeAction(id, settings.actionTimeout.toNanos)
         case _ => // ok
       }
   }
@@ -108,13 +108,12 @@ class ConcurrencyEnforcer(settings: ConcurrencyEnforcerSettings, statsCollector:
     else statsCollector ! StatsCollector.NormalCommandSent
   }
 
-  private def reportReply(id: String) = {
-    if (outstanding(id).isProxied) statsCollector ! StatsCollector.ProxiedReplyReceived
-    else statsCollector ! StatsCollector.NormalReplyReceived
+  private def reportReply(id: String, timeNanos: Long) = {
+    statsCollector ! StatsCollector.ReplyReceived(outstanding(id).isProxied, timeNanos)
   }
 
-  private def completeAction(id: String) = {
-    reportReply(id)
+  private def completeAction(id: String, timeNanos: Long) = {
+    reportReply(id, timeNanos)
 
     outstanding -= id
     if (queue.nonEmpty) {

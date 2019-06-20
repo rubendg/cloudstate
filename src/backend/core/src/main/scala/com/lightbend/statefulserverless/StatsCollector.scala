@@ -35,6 +35,13 @@ object StatsCollector {
 
   def props(settings: StatsCollectorSettings): Props = Props(new StatsCollector(settings))
 
+  case class RequestReceived(proxied: Boolean)
+
+  val NormalRequestReceived = RequestReceived(false)
+  val ProxiedRequestReceived = RequestReceived(true)
+
+  case class ResponseSent(proxied: Boolean, timeNanos: Long, grpcTimeNanos: Long)
+
   /**
     * A command has been sent to the user function.
     */
@@ -46,10 +53,10 @@ object StatsCollector {
   /**
     * A reply has been received from the user function.
     */
-  case class ReplyReceived private (proxied: Boolean)
+  case class ReplyReceived private (proxied: Boolean, timeNanos: Long)
 
-  val NormalReplyReceived = ReplyReceived(false)
-  val ProxiedReplyReceived = ReplyReceived(true)
+  case object DatabaseOperationStarted
+  case class DatabaseOperationFinished(timeNanos: Long)
 
   case class StatsCollectorSettings(
     namespace: String,
@@ -116,28 +123,59 @@ class StatsCollector(settings: StatsCollectorSettings) extends Actor with Timers
   private val averageProxiedConcurrentRequestsGauge = gauges.AverageProxiedConcurrentRequests.labels(labelValues: _*)
 
 
+  private var commandCount: Int = 0
+  private var proxiedCommandCount: Int = 0
+  private var commandTimeNanos: Long = 0
+  private var proxiedCommandTimeNanos: Long = 0
+  private var commandConcurrency: Int = 0
+  private var proxiedCommandConcurrency: Int = 0
+  private val commandTimeNanosOnConcurrency: mutable.Map[Int, Long] = new mutable.HashMap().withDefaultValue(0)
+  private val commandTimeNanosOnProxiedConcurrency: mutable.Map[Int, Long] = new mutable.HashMap().withDefaultValue(0)
+  private var commandLastChangedNanos: Long = System.nanoTime()
+
   private var requestCount: Int = 0
-  private var proxiedCount: Int = 0
-  private var concurrency: Int = 0
-  private var proxiedConcurrency: Int = 0
+  private var proxiedRequestCount: Int = 0
+  private var requestTimeNanos: Long = 0
+  private var proxiedRequestTimeNanos: Long = 0
+  private var requestGrpcTimeNanos: Long = 0
+  private var requestConcurrency: Int = 0
+  private var proxiedRequestConcurrency: Int = 0
+  private val requestTimeNanosOnConcurrency: mutable.Map[Int, Long] = new mutable.HashMap().withDefaultValue(0)
+  private val requestTimeNanosOnProxiedConcurrency: mutable.Map[Int, Long] = new mutable.HashMap().withDefaultValue(0)
+  private var requestLastChangedNanos: Long = System.nanoTime()
 
-  private var lastChangedNanos: Long = System.nanoTime()
-  // Mutable maps for performance because these will be frequently updated
-  // Possible optimisation: use arrays for concurrency levels below a certain threshold
-  private val timeNanosOnConcurrency: mutable.Map[Int, Long] = new mutable.HashMap().withDefaultValue(0)
-  private val timeNanosOnProxiedConcurrency: mutable.Map[Int, Long] = new mutable.HashMap().withDefaultValue(0)
+  private var databaseCount: Int = 0
+  private var databaseTimeNanos: Long = 0
+  private var databaseConcurrency: Int = 0
+  private val databaseTimeNanosOnConcurrency: mutable.Map[Int, Long] = new mutable.HashMap().withDefaultValue(0)
+  private var databaseLastChangedNanos: Long = System.nanoTime()
 
-  private var lastReportedMillis = System.currentTimeMillis()
+  private var lastReportedNanos = System.nanoTime()
 
   // Report every second - this
   timers.startPeriodicTimer("tick", Tick, settings.reportPeriod)
 
-  private def updateState(): Unit = {
+  private def updateCommandState(): Unit = {
     val currentNanos = System.nanoTime()
-    val sinceLastNanos = currentNanos - lastChangedNanos
-    timeNanosOnConcurrency.update(concurrency, timeNanosOnConcurrency(concurrency) + sinceLastNanos)
-    timeNanosOnProxiedConcurrency.update(proxiedConcurrency, timeNanosOnProxiedConcurrency(proxiedConcurrency) + sinceLastNanos)
-    lastChangedNanos = currentNanos
+    val sinceLastNanos = currentNanos - commandLastChangedNanos
+    commandTimeNanosOnConcurrency.update(commandConcurrency, commandTimeNanosOnConcurrency(commandConcurrency) + sinceLastNanos)
+    commandTimeNanosOnProxiedConcurrency.update(proxiedCommandConcurrency, commandTimeNanosOnProxiedConcurrency(proxiedCommandConcurrency) + sinceLastNanos)
+    commandLastChangedNanos = currentNanos
+  }
+
+  private def updateRequestState(): Unit = {
+    val currentNanos = System.nanoTime()
+    val sinceLastNanos = currentNanos - requestLastChangedNanos
+    requestTimeNanosOnConcurrency.update(requestConcurrency, requestTimeNanosOnConcurrency(requestConcurrency) + sinceLastNanos)
+    requestTimeNanosOnProxiedConcurrency.update(proxiedRequestConcurrency, requestTimeNanosOnProxiedConcurrency(proxiedRequestConcurrency) + sinceLastNanos)
+    requestLastChangedNanos = currentNanos
+  }
+
+  private def updateDatabaseState(): Unit = {
+    val currentNanos = System.nanoTime()
+    val sinceLastNanos = currentNanos - databaseLastChangedNanos
+    databaseTimeNanosOnConcurrency.update(databaseConcurrency, databaseTimeNanosOnConcurrency(databaseConcurrency) + sinceLastNanos)
+    databaseLastChangedNanos = currentNanos
   }
 
 
@@ -160,46 +198,123 @@ class StatsCollector(settings: StatsCollectorSettings) extends Actor with Timers
     def toSeconds(value: Long): Double = value.asInstanceOf[Double] / SecondInNanos
 
     val totalTimeUsed = times.values.sum
-    if (totalTimeUsed > 0) {
+    val average = if (totalTimeUsed > 0) {
       times.map {
         case (c, value) => c * toSeconds(value)
       }.sum / toSeconds(totalTimeUsed)
     } else 0.0
+
+    math.max(average, 0.0)
   }
 
   override def receive: Receive = {
     case CommandSent(proxied) =>
-      updateState()
+      updateCommandState()
+      commandCount += 1
+      commandConcurrency += 1
+      if (proxied) {
+        proxiedCommandCount += 1
+        proxiedCommandConcurrency += 1
+      }
+
+    case ReplyReceived(proxied, timeNanos) =>
+      updateCommandState()
+      commandConcurrency -= 1
+      commandTimeNanos += timeNanos
+      if (proxied) {
+        proxiedCommandConcurrency -= 1
+        proxiedCommandTimeNanos += timeNanos
+      }
+
+    case RequestReceived(proxied) =>
+      updateRequestState()
       requestCount += 1
-      concurrency += 1
+      requestConcurrency += 1
       if (proxied) {
-        proxiedCount += 1
-        proxiedConcurrency += 1
+        proxiedRequestCount += 1
+        proxiedRequestConcurrency += 1
       }
-    case ReplyReceived(proxied) =>
-      updateState()
-      concurrency -= 1
+
+    case ResponseSent(proxied, timeNanos, grpcTimeNanos) =>
+      updateRequestState()
+      requestConcurrency -= 1
+      requestTimeNanos += timeNanos
+      requestGrpcTimeNanos += grpcTimeNanos
       if (proxied) {
-        proxiedConcurrency -= 1
+        proxiedRequestConcurrency -= 1
+        proxiedRequestTimeNanos += timeNanos
       }
+
+    case DatabaseOperationStarted =>
+      updateDatabaseState()
+      databaseCount += 1
+      databaseConcurrency += 1
+
+    case DatabaseOperationFinished(timeNanos) =>
+      updateDatabaseState()
+      databaseTimeNanos += timeNanos
+      databaseConcurrency -= 1
+
     case Tick =>
-      val currentTime = System.currentTimeMillis()
-      updateState()
-      val reportPeriodSeconds = Math.max(currentTime - lastReportedMillis, 1).asInstanceOf[Double] / 1000
+      val currentTime = System.nanoTime()
+      updateCommandState()
+      val reportPeriodNanos = Math.max(currentTime - lastReportedNanos, 1).asInstanceOf[Double]
+      val reportPeriodSeconds =  reportPeriodNanos / SecondInNanos
 
-      val avgConcurrency = weightedAverage(timeNanosOnConcurrency)
-      val avgProxiedConcurrency = weightedAverage(timeNanosOnProxiedConcurrency)
-      log.debug(s"Reporting concurrency of $avgConcurrency with $requestCount requests and current concurrency of $concurrency")
+      val avgCommandConcurrency = weightedAverage(commandTimeNanosOnConcurrency)
+      //val avgProxiedCommandConcurrency = weightedAverage(commandTimeNanosOnProxiedConcurrency)
+      val avgRequestConcurrency = weightedAverage(requestTimeNanosOnConcurrency)
+      val avgProxiedRequestConcurrency = weightedAverage(requestTimeNanosOnProxiedConcurrency)
+      val avgDatabaseConcurrency = weightedAverage(databaseTimeNanosOnConcurrency)
+
+      val avgRequestTime = if (requestCount > 0) requestTimeNanos / requestCount / 1000000 else 0
+      val avgGrpcTime = if (requestCount > 0) requestGrpcTimeNanos / requestCount / 1000000 else 0
+      val avgDatabaseTime = if (databaseCount > 0) databaseTimeNanos / databaseCount / 1000000 else 0
+      val avgCommandTime = if (commandCount > 0) commandTimeNanos / commandCount / 1000000 else 0
+
+      val entityCount = Serve.entityExtractCount.getAndSet(0)
+      val entityTime = Serve.entityExtractTime.getAndSet(0)
+      val avgEntity = if (entityCount > 0) entityTime / entityCount / 1000000 else 0
+
+      log.debug("R:%4d  RC:%6.2f  RT:%5dms  GT:%5dms  D:%4d  DC:%6.2f  DT:%5dms  C:%4d  CC:%6.2f  CT:%5dms   E:%4d  ET:%5dms".format(
+        requestCount,
+        avgRequestConcurrency,
+        avgRequestTime,
+        avgGrpcTime,
+
+        databaseCount,
+        avgDatabaseConcurrency,
+        avgDatabaseTime,
+
+        commandCount,
+        avgCommandConcurrency,
+        avgCommandTime,
+
+        entityCount,
+        avgEntity
+      ))
+
       operationsPerSecondGauge.set(requestCount.asInstanceOf[Double] / reportPeriodSeconds)
-      proxiedOperationsPerSecondGauge.set(proxiedCount / reportPeriodSeconds)
-      averageConcurrentRequestsGauge.set(avgConcurrency)
-      averageProxiedConcurrentRequestsGauge.set(avgProxiedConcurrency)
+      proxiedOperationsPerSecondGauge.set(proxiedRequestCount / reportPeriodSeconds)
+      averageConcurrentRequestsGauge.set(avgRequestConcurrency - avgDatabaseConcurrency)
+      averageProxiedConcurrentRequestsGauge.set(avgProxiedRequestConcurrency)
 
-      lastReportedMillis = currentTime
+      lastReportedNanos = currentTime
+      commandCount = 0
+      proxiedCommandCount = 0
+      commandTimeNanosOnConcurrency.clear()
+      commandTimeNanosOnProxiedConcurrency.clear()
+      commandTimeNanos = 0
+      proxiedCommandTimeNanos = 0
       requestCount = 0
-      proxiedCount = 0
-      timeNanosOnConcurrency.clear()
-      timeNanosOnProxiedConcurrency.clear()
-
+      proxiedRequestCount = 0
+      requestTimeNanosOnConcurrency.clear()
+      requestTimeNanosOnProxiedConcurrency.clear()
+      requestTimeNanos = 0
+      proxiedRequestTimeNanos = 0
+      requestGrpcTimeNanos = 0
+      databaseCount = 0
+      databaseTimeNanosOnConcurrency.clear()
+      databaseTimeNanos = 0
   }
 }

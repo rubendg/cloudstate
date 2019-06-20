@@ -258,10 +258,12 @@ class KnativeRevisionOperatorFactory(implicit mat: Materializer, ec: ExecutionCo
     private def createSideCar(revision: KnativeRevision.Resource, deployer: EventSourcedDeployer, image: String, env: Seq[EnvVar]) = {
       val jvmMemory = deployer.sidecarJvmMemory.getOrElse("256m")
       val sidecarResources = deployer.sidecarResources.getOrElse(Resource.Requirements(
-        limits = Map(Resource.memory -> Resource.Quantity("512Mi")),
+        limits = Map(
+          Resource.memory -> Resource.Quantity("512Mi")
+        ),
         requests = Map(
           Resource.memory -> Resource.Quantity("512Mi"),
-          Resource.cpu -> Resource.Quantity("0.5")
+          Resource.cpu -> Resource.Quantity("400m")
         )
       ))
 
@@ -355,7 +357,8 @@ class KnativeRevisionOperatorFactory(implicit mat: Materializer, ec: ExecutionCo
         ),
         volumes = revision.spec.volumes.getOrElse(Nil) :+ Volume("varlog", Volume.EmptyDir()),
         serviceAccountName = revision.spec.serviceAccountName.getOrElse(""),
-        terminationGracePeriodSeconds = revision.spec.timeoutSeconds.map(_.asInstanceOf[Int])
+        terminationGracePeriodSeconds = revision.spec.timeoutSeconds.map(_.asInstanceOf[Int]),
+        nodeSelector = Map("target" -> "knative")
       )
 
       val deploymentName = deploymentNameFor(revision)

@@ -105,16 +105,16 @@ class ServerManager(config: ServerManager.Configuration)(implicit mat: Materiali
       val clusterShardingSettings = ClusterShardingSettings(system)
       val stateManager = context.watch(clusterSharding.start(
         typeName = reply.persistenceId,
-        entityProps = StateManagerSupervisor.props(client, stateManagerConfig, concurrencyEnforcer),
+        entityProps = StateManagerSupervisor.props(client, stateManagerConfig, concurrencyEnforcer, statsCollector),
         settings = clusterShardingSettings,
         messageExtractor = new Serve.RequestMessageExtractor(config.numberOfShards),
-        allocationStrategy = new DynamicLeastShardAllocationStrategy(1, 10, 10, 0.1),
+        allocationStrategy = new DynamicLeastShardAllocationStrategy(1, 10, 3, 0.0),
         handOffStopMessage = StateManager.Stop
       ))
 
       log.debug("Creating gRPC proxy for {}", reply.persistenceId)
 
-      val handler = Serve.createRoute(stateManager, config.proxyParallelism, config.relayTimeout, reply)
+      val handler = Serve.createRoute(stateManager, statsCollector, config.proxyParallelism, config.relayTimeout, reply)
 
       log.debug("Starting gRPC proxy for {}", reply.persistenceId)
 
