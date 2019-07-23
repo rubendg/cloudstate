@@ -14,6 +14,25 @@
  * limitations under the License.
  */
 
-module.exports.CloudState = require("./src/cloudstate");
-module.exports.EventSourced = require("./src/eventsourced");
-module.exports.crdt = require("./src/crdt");
+const path = require("path");
+const protobuf = require("protobufjs");
+
+module.exports = function(desc, includeDirs) {
+  const root = new protobuf.Root();
+  root.resolvePath = function (origin, target) {
+    for (let i = 0; i < includeDirs.length; i++) {
+      const directory = includeDirs[i];
+      const fullPath = path.resolve(directory, target);
+      try {
+        fs.accessSync(fullPath, fs.constants.R_OK);
+        return fullPath;
+      } catch (err) {
+      }
+    }
+    return null;
+  };
+
+  root.loadSync(desc);
+  root.resolveAll();
+  return root;
+};

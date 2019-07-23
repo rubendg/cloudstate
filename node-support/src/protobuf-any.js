@@ -15,22 +15,14 @@
  */
 
 const path = require("path");
-const protobuf = require("protobufjs");
-const Root = protobuf.Root;
+const loadProtobuf = require("protobuf-helper");
 
-const Any = protobuf
-  .loadSync(path.join(__dirname, "..", "proto-ext", "google", "protobuf", "any.proto"))
+const Any = loadProtobuf(path.join("google", "protobuf", "any.proto"), [path.join(__dirname, "..", "protoc", "include")])
   .lookupType("google.protobuf.Any");
 
 
 module.exports = class AnySupport {
-  /**
-   * @param {Root} root The root to do all serialization from.
-   */
   constructor(root) {
-    /**
-     * @type {Root}
-     */
     this.root = root;
   }
 

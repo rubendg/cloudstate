@@ -16,7 +16,7 @@
 
 const path = require("path");
 const fs = require("fs");
-const protobuf = require("protobufjs");
+const loadProtobuf = require("protobuf-helper");
 const grpc = require("grpc");
 const protoLoader = require("@grpc/proto-loader");
 const EventSourcedServices = require("./eventsourced-support");
@@ -42,22 +42,7 @@ module.exports = class EventSourced {
       path.resolve(__dirname, "..", "protoc", "include")
     ].concat(this.options.includeDirs);
 
-    this.root = new protobuf.Root();
-    this.root.resolvePath = function (origin, target) {
-      for (let i = 0; i < allIncludeDirs.length; i++) {
-        const directory = allIncludeDirs[i];
-        const fullPath = path.resolve(directory, target);
-        try {
-          fs.accessSync(fullPath, fs.constants.R_OK);
-          return fullPath;
-        } catch (err) {
-        }
-      }
-      return null;
-    };
-
-    this.root.loadSync(desc);
-    this.root.resolveAll();
+    this.root = loadProtobuf(desc, allIncludeDirs);
 
     this.serviceName = serviceName;
     // Eagerly lookup the service to fail early

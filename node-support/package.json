@@ -1,11 +1,12 @@
 {
-  "name": "cloudstate-event-sourcing",
-  "version": "0.2.4",
-  "description": "Support for implementing CloudState event sourced functions",
+  "name": "cloudstate",
+  "version": "0.0.1",
+  "description": "Support for implementing CloudState functions",
   "keywords": [
     "serverless",
     "cloudstate",
-    "event-sourcing"
+    "event-sourcing",
+    "crdt"
   ],
   "homepage": "https://github.com/cloudstateio/cloudstate",
   "bugs": {
@@ -19,7 +20,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/cloudstate/cloudstate",
+    "url": "https://github.com/cloudstateio/cloudstate",
     "directory": "src/node-support"
   },
   "files": [
